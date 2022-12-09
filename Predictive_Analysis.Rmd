@@ -1,0 +1,205 @@
+---
+title: "Predictive Analysis"
+output: html_document
+date: "2022-12-07"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(caTools)
+library(caret)
+library(leaps)
+library(MASS)
+library(grid)
+library(gridExtra)
+library(glmnet)
+surgery_df_x <- read.csv("cleaned_surgery.csv")
+set.seed(9999)
+```
+
+Have a look at distributions of each variable to see if there is anything off from the distribution. Since missing values were imputed, 
+there shouldn't really be anything crazy going on.The spikes in each distribution is probably where the imputation resides.
+```{r}
+surgery_df_m <- surgery_df_x %>%
+  subset(select = c(5:30))
+
+melt.surgery <- reshape2::melt(surgery_df_m)
+
+ggplot(data = melt.surgery, aes(x = value)) + 
+stat_density() + 
+facet_wrap(~variable, scales = "free")
+
+#Lots of older patients requiring surgery. Most surgeries were not elective, hence were an emergency or life threatening.
+```
+
+Split into training and sample dfs. Will utilize  a logarithmic stepwise method to build model
+```{r}
+names(surgery_df_x) = gsub(pattern = "_avg*", replacement = "", x = names(surgery_df_x))#just making names a bit neater
+
+surgery_df_x <- surgery_df_x%>%
+  subset(select = -c(X,patient_id,
+                     hospital_id,
+                     apache_post_operative,
+                     apache_2_bodysystem,
+                     apache_3j_bodysystem,
+                     apache_4a_icu_death_prob,
+                     apache_4a_hospital_death_prob))       # A bit more tidying
+
+
+split_sample <- sample.split(surgery_df_x, SplitRatio = 0.7)
+
+train_set  <- subset(surgery_df_x, split_sample == TRUE)
+test_set   <- subset(surgery_df_x, split_sample == FALSE)
+```
+Logistic Regression
+```{r}
+logistic_r <- glm(hospital_death ~ ., data = surgery_df_x, family = "binomial")
+summary(logistic_r)
+
+#Check the most important variables to model. Perhaps do a logistic regression
+importances <- varImp(logistic_r)
+
+importances %>%
+  arrange(desc(Overall)) %>%
+  top_n(20)
+
+surgery_prob <- predict(logistic_r, newdata = test_set, type = "response")
+pred <- ifelse(surgery_prob > 0.5, 1, 0)
+
+cm <- confusionMatrix(factor(pred), factor(test_set$hospital_death), positive = as.character(1)) #Created Confusion Matrix
+cm_d <- as.data.frame(cm$table)                                                                  #Bunch of Cleaning to prepare for a heatmap...ish
+cm_st <-data.frame(cm$overall)                                                                   # confusion matrix statistics as data.frame
+cm_st$cm.overall <- round(cm_st$cm.overall,3)                                                    #Lets do 3 sig figs
+cm_d$diag <- cm_d$Prediction == cm_d$Reference                                                   # Get the Diagonal. True Predictions
+cm_d$ndiag <- cm_d$Prediction != cm_d$Reference                                                  # Off Diagonal. Wrong Predictions
+cm_d$Reference <-  likert::reverse.levels(cm_d$Reference)                                        # diagonal starts at top left
+cm_d$ref_freq <- cm_d$Freq * ifelse(is.na(cm_d$diag),-1,1)
+
+cm_d$Reference <- as.character(cm_d$Reference)
+cm_d$Prediction <- as.character(cm_d$Prediction)
+
+cm_d <- cm_d %>%
+  mutate(Prediction = recode(Prediction, '1' = 'Died', '0' = 'Survived')) %>%
+  mutate(Reference = recode(Reference, '1' = 'Died', '0' = 'Survived')) %>%
+  mutate(diag = as.character(diag)) %>%
+  mutate(diag = recode(diag, 'TRUE' = 'Correct Prediction', 'FALSE' = 'Wrong Prediction'))%>%
+  mutate(Proportion = Freq/sum(Freq))
+
+plt1 <-  ggplot(data = cm_d, aes(x = Reference , y = Prediction, fill = factor(diag), alpha = Proportion)) +
+  geom_tile() + 
+  geom_text(aes(label=Freq),vjust = .5)+
+  scale_fill_manual(values=c("limegreen", "pink")) +
+  labs(fill = "Prediction Results")
+
+plt2 <-  tableGrob(cm_st)
+
+grid.arrange(plt1, plt2, nrow = 1, ncol = 2, 
+             top=textGrob("Confusion Matrix",gp=gpar(fontsize=20,font=1)))
+```
+When applying the logistic regression model to the test data, we get an accuracy of 92% with a p-value of <0.0001. This suggests that the model
+is statistically significant in explaining the survival rate. However, the Kappa value is quite meh at 0.3, suggesting fair agreement of the data. The next steps is to see if the model can be improved, either by increasing accuracy, or removing some redundant variables to minimize the amount of data that would be required.
+
+From the importances file, we can see that the variables that appear to have the greatest effect on surgery success are age, lactate, spo2, arterial po2
+pao2fio2ratio, wbc, body temperature, bun(nitrogen in blood), elective surgery, heartrate, time to operation, blood glucose, the presence of a metastatic tumor, resprate, hco3, presence of diabetes, bilirubin, hemaglobin and sysbp.
+
+Most of these variables appear to have some connection to respiratory rate or the ability to exchange oxygen in the bloodstream. Hypoxia can lead to brain death, and it is known that anesthaesia may inhibit breathing. Perhaps the use of oxygen and ventilators would be a necessary variable when collecting further stats data on surgery survival.
+```{r}
+#So the stepwise function is taking forever, and stepwise isn't all that respected in the stats community, so will use LASSO instead
+#When there are too many variables, we want to reduce complexity of model. We want the best value of our coefficients to minimize sum squared errors.
+# We want to find the lambda that minimizes error predicted
+
+#Turn training data into matrix
+train_x <- model.matrix(hospital_death~., train_set)[,-1]
+
+train_y <- ifelse(train_set$hospital_death == 1, 1, 0)
+
+#find best lambda by cross validation
+cv_lasso_train <- cv.glmnet(train_x,train_y, family = "binomial", alpha = 1)
+
+cv_lasso_train
+#lambda min gives minimum mean cross validated error.lambda 1se gives the most regularized model such that the cross-validated error is within one 
+#standard error of the minimum.
+#1se is typically the most recommended. + It also removes more variables compared to min, which was the goal of using lasso
+lasso_model <- glmnet(train_x, train_y, alpha = 1, family = "binomial",
+                lambda = cv_lasso_train$lambda.1se)
+
+coef(lasso_model)
+
+#The chosen predictors also align with the most important variable in df "importance"
+#Age has a positive effect on death rate, bmi oddly has a negative effect. electing to do a surgery also has a negative effect on death rate.
+#Among the ethnicities, only hispanics had a positive effect on death rate relative to all other ethnicities. Neuro-ICUs operations were the only operations with a marked increase risk to death
+
+#Apply model to test data
+x_test <- model.matrix(hospital_death ~., test_set)[,-1]
+probabilities <- lasso_model %>% predict(newx = x_test)
+predicted_classes <- ifelse(probabilities > 0.5, 1,0 )
+
+#Model Accuracy
+observed_classes <- test_set$hospital_death
+mean(predicted_classes == observed_classes) #Its 0.9217, suggesting 92% accuracy, which is slightly lower than the original model.
+
+plot(cv_lasso_train)
+#From the plot, the most optimal log lambda is around -8.8ish as denoted by the first dotted line, with the 1se being within the second dotted line.
+```
+```{r}
+#Lets put the lasso model in a heat map
+lm <- confusionMatrix(factor(predicted_classes), factor(test_set$hospital_death), positive = as.character(1)) 
+lm_d <- as.data.frame(lm$table)                                                                  #Bunch of Cleaning to prepare for a heatmap...ish
+lm_st <-data.frame(lm$overall)                                                                   # confusion matrix statistics as data.frame
+lm_st$lm.overall <- round(lm_st$lm.overall,3)                                                    #Lets do 3 sig figs
+lm_d$diag <- lm_d$Prediction == lm_d$Reference                                                   # Get the Diagonal. True Predictions
+lm_d$ndiag <- lm_d$Prediction != lm_d$Reference                                                  # Off Diagonal. Wrong Predictions
+lm_d$Reference <-  likert::reverse.levels(lm_d$Reference)                                        # diagonal starts at top left
+lm_d$ref_freq <- lm_d$Freq * ifelse(is.na(lm_d$diag),-1,1)
+
+lm_d$Reference <- as.character(lm_d$Reference)
+lm_d$Prediction <- as.character(lm_d$Prediction)
+
+lm_d <- lm_d %>%
+  mutate(Prediction = recode(Prediction, '1' = 'Died', '0' = 'Survived')) %>%
+  mutate(Reference = recode(Reference, '1' = 'Died', '0' = 'Survived')) %>%
+  mutate(diag = as.character(diag)) %>%
+  mutate(diag = recode(diag, 'TRUE' = 'Correct Prediction', 'FALSE' = 'Wrong Prediction'))%>%
+  mutate(Proportion = Freq/sum(Freq))
+
+plt3 <-  ggplot(data = lm_d, aes(x = Reference , y = Prediction, fill = factor(diag), alpha = Proportion)) +
+  geom_tile() + 
+  geom_text(aes(label=Freq),vjust = .5)+
+  scale_fill_manual(values=c("limegreen", "pink")) +
+  labs(fill = "Prediction Results")
+
+plt4 <-  tableGrob(lm_st)
+
+grid.arrange(plt3, plt4, nrow = 1, ncol = 2, 
+             top=textGrob("Confusion Matrix LASSO",gp=gpar(fontsize=20,font=1)))
+
+#Hilariously, the Kappa decreased even further, which can be interpreted that there is a slight match in the data. Accuracy however, remained the same if
+#slightly lower than the full model. But since we managed to get rid of more than half of all variables, it could be seen as a success.
+
+coef(lasso_model) #Can Probably Write a Summary based on these coefficients alone.Many of the variables on probation were also removed. 
+```
+
+```{r}
+#Now lets apply the LASSO model to the original dataset. To see how it compares to the APACHE scores, since I'm curious about that
+final_test <- model.matrix(hospital_death ~., data = surgery_df_x)[,-1]
+final_probabilities <- lasso_model %>% predict(newx = final_test)
+final_predicted <- ifelse(probabilities > 0.5, 1,0 )
+
+original_file <- read.csv("cleaned_surgery.csv")
+final_file <- cbind(original_file, final_probabilities)
+final_file_x <- final_file %>%
+  subset(select = c("apache_4a_hospital_death_prob","s0"))
+
+#Interestingly, most of my model probabilities are negative. Which is odd, since you shouldn't have a negative probability to die.
+#What's stranger is that the apache criteria also has negative death probabilities. I decided to put both values in a correlation matrix to 
+#check out whats happening
+
+Hmisc::rcorr(as.matrix(final_file_x))
+ 
+#With a correlation of 0.37...they are kinda correlated? The calculated probabilities with the full logistic regression model also dives into the 
+#negatives. So I suppose if the number is negative, there is absolutely zero chance of death via the model. 
+```
+
+
+
+

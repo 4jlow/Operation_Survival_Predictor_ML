@@ -1,0 +1,81 @@
+---
+title: "Data Cleaning"
+output: html_document
+date: "2022-12-05"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(tidyselect)
+library(caTools)
+
+#Reminder:
+#probation_cat are potentially dangerous categories that can be removed later
+```
+
+Try to reduce the total number of variables.
+```{r}
+surgery_df <- read.csv("Dataset.csv")
+
+surgery_df_1 <- surgery_df%>%
+  select(-c(encounter_id,
+            hospital_admit_source,          #Redundant with icu_admit_source
+            icu_id, 
+            icu_stay_type,                  #Same type of variable as readmission status. However, upon survival, subject should still count as population
+            readmission_status,             
+            contains("_apache"),            #apache covariates removed since those are used in another pre-existing model to estimate survivability rate
+            contains("invasive"),           #non-invasive methods are typically standard, but invasive methods are used when required. Using combined col.
+            apache_2_diagnosis,             #apache diagnosis score removed because the numbers in the data don't fit in the tool range for some reason.
+            apache_3j_diagnosis))
+
+df_minmax <-surgery_df_1%>%           #I want the averages. Don't particularly need min max for the model.
+  select(contains("min"),
+         contains("max"))
+
+df_minmax <- lapply(df_minmax, as.numeric)
+df_minmax <- as.data.frame(df_minmax)
+
+
+longer_minmax <- pivot_longer(df_minmax, cols = contains("_"), 
+  names_pattern = "(.*)_(min|max)",
+  names_to = c("dimension", ".value"))  
+
+longer_minmax <- longer_minmax %>%
+  mutate(avg = (min + max)/2)
+
+df_avg <- longer_minmax %>%
+  select(-min,-max)%>%
+  group_by(dimension) %>%
+  mutate(row = row_number()) %>%
+  pivot_wider(names_from = dimension, values_from = avg,names_glue="{dimension}_{.value}") %>%
+  select(-row)
+
+surgery_df_avgs <- cbind(surgery_df_1, df_avg)
+surgery_df_avgs <- surgery_df_avgs %>%
+  select(-c(contains("max"),contains("min")))
+
+```
+Count NAs
+
+A significant amount of missing data appears to be in the categories that require lab tests. It is most likely that the tests simply weren't
+performed for these individuals. I could get rid of them, but I'd rather keep whatever data I have if possible.
+To keep as much data as possible, I am going to impute the mean average as a replacement for NAs. I will also make a list of all variables with more than
+20k NAs to remove later if need be. I will also have to remove rows that have NAs in categorical variables since those are not imputable.
+```{r}
+surg_na <- sapply(surgery_df_avgs, function(count_na) sum(is.na(count_na)))
+probation_cat <- names(surg_na)[surg_na > 20000]
+
+surg_na
+
+surgery_df_x <- surgery_df_avgs %>%
+  filter(!is.na(cirrhosis))%>%
+  mutate_if(is.numeric, funs(replace(., is.na(.), median(., na.rm = TRUE))))   #Imputed by median instead of mean in case of huge outliers
+
+surg_na <- sapply(surgery_df_x, function(count_na) sum(is.na(count_na))) #check to see if all missing values are gone
+
+write.csv(surgery_df_x, file = "cleaned_surgery.csv")
+```
+
+
+
+
