@@ -1,9 +1,16 @@
 # Operation_Survival_Predictor_ML
 
-Generated a predictive survival model for surgical healthcare data obtained from kaggle. There was a total of 180 variables and 100k columns, which seemed ideal for practicing
-ML techniques with data that I should have some familiarity with. Alot of data was missing for variables related to lab tests, however I wanted to preserve as much data as 
-possible, and imputed all columns with their median values, with the exception of categorical columns which were exluded. ~750 total rows were excluded.
-The imputation could have led to some undesirable effects, which would be detailed below.
+Generated a predictive survival model for surgical healthcare data obtained from kaggle. 
+
+## The Data 
+
+With a total of 180 variables and 100k columns, this dataset had an expansive amount of potential variables that might have been useful for predicting survival rate.
+Much of the data was related to lab tests, and there were many missing values which had to be accounted for.
+
+## The Cleaning
+
+Alot of data was missing for variables related to lab tests, however I wanted to preserve as much data as possible, and imputed all columns with their median values, with the exception of categorical columns which were exluded. ~750 total rows were excluded. This might seem like an odd choice, since imputations of large proportions of data would have them settle near the median, however I had to choose between accuracy, and best practices. While in a professional setting, I would have excluded the columns, I wanted to have a result that would have provided as much accuracy as possible. The imputation could have led to some undesirable effects, which would be detailed below.
+## Modeling Choices
 
 I produced a full logistic regression model using all the variables and used a train/test split to evaluate the accuracy of the model. Afterwards, I used
 LASSO in order to reduce the total number of variables in the model, while trying to preserve accuracy as much as possible.
@@ -11,6 +18,8 @@ While I initially wanted to do a stepwise regression, there were 2 major reasons
 are not significant to the model, however model significance does not mean that they don't have an effect on the actual outcome. Hence, why it isn't popular
 with the stats community. The second and probably more important reason is that the stepwise regression function takes way too long to execute with so many
 variables in the dataset, that I got tired of waiting and ended up looking for alternatives.
+
+## Model Results
 
 The full model had an accuracy of 92.6% with a 70/30 split. It also had a Kappa of 0.3 which suggests there was only a fair agreement with the model and the test data.
 However, after using LASSO, I utilized lambda 1se which gives the most regularized model such that the cross-validated error is within one standard error of the minimum lambda.
